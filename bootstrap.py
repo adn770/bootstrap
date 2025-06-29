@@ -3,20 +3,42 @@
 import subprocess
 import os
 import sys
-import time # Added for sleep
+import time
+
+# --- Global Constants for URLs ---
+OH_MY_ZSH_INSTALL_URL = "https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh"
+POWERLEVEL10K_REPO_URL = "https://github.com/romkatv/powerlevel10k.git"
+VIM_PLUG_URL = "https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim"
+# Base URL for dotfiles from adn770/bootstrap repository
+DOTFILES_BASE_URL = "https://raw.githubusercontent.com/adn770/bootstrap/main"
+
 
 def run_command(command, message=None, check=True):
     """
-    Runs a shell command, prints output, and handles errors.
+    Runs a shell command, prints output in real-time, and handles errors.
     """
     if message:
         print(f"\n--- {message} ---")
     try:
-        process = subprocess.run(command, shell=True, check=check, capture_output=True, text=True)
-        if process.stdout:
-            print(process.stdout)
-        if process.stderr:
-            print(process.stderr)
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+
+        # Print stdout in real-time
+        for line in process.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+        # Print stderr in real-time
+        for line in process.stderr:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+
+        process.wait()  # Wait for the command to complete
+
+        if check and process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, command,
+                                                output=process.stdout.read(),
+                                                stderr=process.stderr.read())
         return process
     except subprocess.CalledProcessError as e:
         print(f"Error executing command: {e}")
@@ -27,13 +49,147 @@ def run_command(command, message=None, check=True):
         print(f"Command not found: {command.split()[0]}")
         sys.exit(1)
 
-def action_base():
+class ConfigFileManager:
     """
-    Sets up Zsh as the default shell and installs base packages including Vim-Plug.
+    A helper class for reading, writing, and safely modifying configuration files.
     """
-    print("\n--- Running 'base' action: Setting up Zsh and installing base packages ---")
+    def __init__(self, file_path):
+        self.file_path = os.path.expanduser(file_path)
+        self.content = self._read_file()
 
-    # Check and install zsh
+    def _read_file(self):
+        """Reads the content of the file."""
+        if os.path.exists(self.file_path):
+            with open(self.file_path, 'r') as f:
+                return f.readlines()
+        return []
+
+    def _write_file(self, content):
+        """Writes the given content to the file."""
+        try:
+            with open(self.file_path, 'w') as f:
+                f.writelines(content)
+            print(f"Successfully updated {self.file_path}.")
+            return True
+        except Exception as e:
+            print(f"Error writing to {self.file_path}: {e}")
+            return False
+
+    def ensure_line_present(self, line_to_add, after_line_prefix=None):
+        """Ensures a specific line is present in the file, optionally after a
+        prefix.
+        """
+        normalized_line_to_add = line_to_add.strip()
+
+        # Check if the line (or a line containing it) already exists
+        for line in self.content:
+            if normalized_line_to_add in line.strip():
+                print(f"Content '{normalized_line_to_add}' already exists in "
+                      f"{self.file_path}. Skipping.")
+                return True
+
+        if after_line_prefix:
+            found_idx = -1
+            for i, line in enumerate(self.content):
+                if line.strip().startswith(after_line_prefix):
+                    found_idx = i
+                    break
+
+            if found_idx != -1:
+                # Insert the new line right after the found line
+                self.content.insert(found_idx + 1, line_to_add + "\n"
+                                    if not line_to_add.endswith('\n')
+                                    else line_to_add)
+                print(f"Added '{normalized_line_to_add}' after "
+                      f"'{after_line_prefix}' in {self.file_path}.")
+            else:
+                # If prefix not found, just append to the end
+                if not self.content or not self.content[-1].endswith('\n'):
+                    self.content.append('\n')
+                self.content.append(line_to_add + "\n"
+                                    if not line_to_add.endswith('\n')
+                                    else line_to_add)
+                print(f"Added '{normalized_line_to_add}' to {self.file_path} "
+                      f"(prefix '{after_line_prefix}' not found).")
+        else:
+            # Append if no specific placement is needed and it's not already there
+            if not self.content or not self.content[-1].endswith('\n'):
+                self.content.append('\n')
+            self.content.append(line_to_add + "\n"
+                                if not line_to_add.endswith('\n')
+                                else line_to_add)
+            print(f"Added '{normalized_line_to_add}' to {self.file_path}.")
+
+        return self._write_file(self.content)
+
+    def replace_line_prefix(self, prefix, new_line):
+        """Replaces a line starting with a specific prefix with a new line."""
+        new_content = []
+        replaced = False
+        for line in self.content:
+            if line.strip().startswith(prefix):
+                new_content.append(new_line + "\n"
+                                   if not new_line.endswith('\n')
+                                   else new_line)
+                replaced = True
+                print(f"Replaced line starting with '{prefix}' in "
+                      f"{self.file_path}.")
+            else:
+                new_content.append(line)
+
+        if not replaced:
+            # If prefix not found, add the new line at the end
+            if not new_content or not new_content[-1].endswith('\n'):
+                new_content.append('\n')
+            new_content.append(new_line + "\n"
+                               if not new_line.endswith('\n')
+                               else new_line)
+            print(f"Added '{new_line}' to {self.file_path} (prefix '{prefix}' "
+                  "not found).")
+
+        self.content = new_content
+        return self._write_file(self.content)
+
+    def overwrite_file(self, new_content):
+        """Overwrites the entire file with new content."""
+        self.content = [line + "\n" if not line.endswith('\n') else line
+                        for line in new_content.splitlines()]
+        print(f"Overwriting {self.file_path}.")
+        return self._write_file(self.content)
+
+class DotfileDownloader:
+    """
+    A helper class to download dotfiles from a specified GitHub repository.
+    """
+    def __init__(self, base_url):
+        self.base_url = base_url
+
+    def download_dotfile(self, dotfile_name, local_path=None):
+        """
+        Downloads a specific dotfile from the repository to a local path.
+        If local_path is None, it defaults to ~/.dotfile_name.
+        """
+        remote_url = f"{self.base_url}/{dotfile_name}"
+        target_local_path = (os.path.expanduser(local_path if local_path
+                                                else f"~/{dotfile_name}"))
+
+        print(f"Downloading {remote_url} to {target_local_path}...")
+        try:
+            run_command(f"curl -fLo {target_local_path} {remote_url}")
+            print(f"Successfully downloaded {dotfile_name} to "
+                  f"{target_local_path}.")
+            return True
+        except Exception as e:
+            print(f"Error downloading {dotfile_name}: {e}")
+            print(f"Please manually check or download {remote_url}.")
+            return False
+
+def _setup_zsh():
+    """
+    Checks for Zsh, installs it if not present, and sets it as the default
+    shell.
+    """
+    print("\n--- Setting up Zsh ---")
     print("Checking for Zsh installation...")
     result = run_command("which zsh", check=False)
     if result.returncode != 0:
@@ -44,144 +200,190 @@ def action_base():
     else:
         print("Zsh is already installed.")
 
-    # Change default shell to zsh if not already
     current_shell = os.environ.get('SHELL')
     if current_shell != "/usr/bin/zsh" and current_shell != "/bin/zsh":
         print("Changing default shell to Zsh...")
         run_command(f"chsh -s $(which zsh) {os.getenv('USER')}")
-        print("Default shell changed to Zsh. Please log out and log back in for changes to take effect.")
+        print("Default shell changed to Zsh. Please log out and log back in "
+              "for changes to take effect.")
     else:
         print("Zsh is already your default shell.")
 
-    # Install desired packages
-    packages = ["vim", "git", "fzf", "btop", "tmux", "cmake", "bat", "zoxide", "curl"] # Added curl for vim-plug
+def _install_base_packages():
+    """
+    Installs a list of essential packages using apt.
+    """
+    print("\n--- Installing base packages ---")
+    packages = ["bat", "btop", "cmake", "curl", "fzf", "gdb", "git", "tig",
+                "tmux", "vim", "zoxide"]
+    packages.sort()
     print(f"Installing base packages: {', '.join(packages)}...")
     run_command("sudo apt update")
     run_command(f"sudo apt install -y {' '.join(packages)}")
     print("Base packages installed successfully.")
 
-    # Install Vim-Plug
+
+def _configure_vimrc():
+    """
+    Downloads the latest dot.vimrc from GitHub and updates/creates ~/.vimrc.
+    """
+    print("\n--- Configuring ~/.vimrc from GitHub ---")
+    dotfile_downloader = DotfileDownloader(DOTFILES_BASE_URL)
+    dotfile_downloader.download_dotfile("dot.vimrc", "~/.vimrc")
+
+
+def _install_vim_plug():
+    """
+    Installs Vim-Plug for Vim.
+    """
     print("\n--- Installing Vim-Plug ---")
     vim_autoload_dir = os.path.expanduser("~/.vim/autoload")
     vim_plug_path = os.path.join(vim_autoload_dir, "plug.vim")
 
     if not os.path.exists(vim_plug_path):
-        print(f"Creating directory: {vim_autoload_dir}")
-        run_command(f"mkdir -p {vim_autoload_dir}")
         print(f"Downloading Vim-Plug to {vim_plug_path}...")
-        run_command(f"curl -fLo {vim_plug_path} --create-dirs https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim")
+        run_command(f"curl -fLo {vim_plug_path} --create-dirs {VIM_PLUG_URL}")
         print("Vim-Plug installed successfully.")
-        print("\n--- IMPORTANT: Remember to add the Vim-Plug configuration to your ~/.vimrc and run :PlugInstall in Vim. ---")
-        print("  Example .vimrc configuration:")
-        print("  call plug#begin('~/.vim/plugged')")
-        print("  Plug 'tpope/vim-fugitive'")
-        print("  Plug 'airblade/vim-gitgutter'")
-        print("  call plug#end()")
-        time.sleep(2) # Pause briefly to ensure the message is seen
     else:
         print("Vim-Plug is already installed.")
 
 
-def action_ohmyzsh():
+def _run_vim_plug_install():
     """
-    Installs Oh My Zsh and PowerLevel10k, and sets the theme.
+    Runs Vim to install plugins using PlugInstall and then quits.
     """
-    print("\n--- Running 'ohmyzsh' action: Installing Oh My Zsh and PowerLevel10k ---")
+    print("\n--- Running Vim PlugInstall ---")
+    try:
+        run_command("vim +PlugInstall +qall", message="Running Vim PlugInstall")
+        print("Vim PlugInstall completed.")
+    except Exception as e:
+        print(f"Error running Vim PlugInstall: {e}")
+        print("Please run 'vim +PlugInstall +qall' manually inside your "
+              "terminal.")
 
+def _create_ssh_rc_file():
+    """
+    Creates or updates the ~/.ssh/rc file for SSH Agent Forwarding Fix.
+    """
+    print("\n--- Creating ~/.ssh/rc file for SSH Agent Forwarding Fix ---")
+    ssh_dir = os.path.expanduser("~/.ssh")
+    ssh_rc_path = os.path.join(ssh_dir, "rc")
+    ssh_rc_content = """#!/bin/bash
+
+# Fix SSH auth socket location so agent forwarding works with tmux
+if test "$SSH_AUTH_SOCK" ; then
+  ln -sf $SSH_AUTH_SOCK ~/.ssh/ssh_auth_sock
+fi"""
+
+    try:
+        if not os.path.exists(ssh_dir):
+            print(f"Creating directory: {ssh_dir}")
+            os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+            print(f"Set permissions for {ssh_dir} to 0o700.")
+
+        ssh_rc_manager = ConfigFileManager(ssh_rc_path)
+        ssh_rc_manager.overwrite_file(ssh_rc_content)
+        os.chmod(ssh_rc_path, 0o600)
+        print(f"Permissions for '{ssh_rc_path}' set to 0o600.")
+
+    except Exception as e:
+        print(f"Error creating/modifying '{ssh_rc_path}': {e}")
+        print("Please create the file manually if needed.")
+
+def _configure_zshenv():
+    """
+    Adds custom PATH settings and a tmux+ssh helper function to ~/.zshenv.
+    """
+    print("\n--- Configuring ~/.zshenv ---")
+    zshenv_path = os.path.expanduser("~/.zshenv")
+    zshenv_content_to_add = """
+# set PATH so it includes user's private bin if it exists
+if [ -d "$HOME/bin" ] ; then
+    PATH="$HOME/bin:$PATH"
+fi
+
+# set PATH so it includes user's private bin if it exists
+if [ -d "$HOME/.local/bin" ] ; then
+    PATH="$HOME/.local/bin:$PATH"
+fi
+
+# tmux+ssh helper function with iterm integration
+function tmssh () {
+  local IP="$1"
+  if [[ -z "$IP" ]]; then
+    me="${FUNCNAME[0]}${funcstack[1]}"
+    IP="192.168.100.100"
+    echo "usage: $me [ssh-args] hostname"
+  fi
+
+  ssh "$IP" -t 'tmux -CC new -A -s tmssh'
+}
+"""
+    zshenv_manager = ConfigFileManager(zshenv_path)
+    zshenv_manager.ensure_line_present(zshenv_content_to_add.strip())
+
+
+def _install_oh_my_zsh():
+    """
+    Installs Oh My Zsh if it's not already present.
+    """
+    print("\n--- Installing Oh My Zsh ---")
     ohmyzsh_dir = os.path.expanduser("~/.oh-my-zsh")
     if not os.path.exists(ohmyzsh_dir):
-        print("Installing Oh My Zsh...")
-        # The Oh My Zsh installer might try to change the shell and create .zshrc if it doesn't exist.
-        # We use --unattended to prevent it from prompting to change shell.
-        run_command('sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended',
-                    message="Running Oh My Zsh installer (unattended)", check=False)
+        print("Oh My Zsh not found. Installing...")
+        run_command(f'sh -c "$(curl -fsSL {OH_MY_ZSH_INSTALL_URL})" "" --unattended',
+                    message="Running Oh My Zsh installer (unattended)",
+                    check=False)
         print("Oh My Zsh installed successfully.")
     else:
         print("Oh My Zsh is already installed.")
 
+def _install_powerlevel10k_and_set_theme():
+    """
+    Installs PowerLevel10k theme, downloads dot.p10k.zsh, and configures
+    .zshrc.
+    """
+    print("\n--- Installing PowerLevel10k theme and setting it in ~/.zshrc ---")
     p10k_dir = os.path.expanduser("~/.oh-my-zsh/custom/themes/powerlevel10k")
     if not os.path.exists(p10k_dir):
-        print("Installing PowerLevel10k...")
-        run_command("git clone --depth=1 https://github.com/romkatv/powerlevel10k.git " + p10k_dir)
+        print("PowerLevel10k not found. Cloning repository...")
+        run_command(f"git clone --depth=1 {POWERLEVEL10K_REPO_URL} " + p10k_dir)
         print("PowerLevel10k cloned successfully.")
     else:
         print("PowerLevel10k is already installed.")
 
-    # Automatically set ZSH_THEME to powerlevel10k/powerlevel10k in .zshrc
-    zshrc_path = os.path.expanduser("~/.zshrc")
-    if os.path.exists(zshrc_path):
-        print(f"Updating ZSH_THEME in {zshrc_path}...")
-        try:
-            with open(zshrc_path, 'r') as f:
-                lines = f.readlines()
+    # Download dot.p10k.zsh using the new DotfileDownloader
+    dotfile_downloader = DotfileDownloader(DOTFILES_BASE_URL)
+    dotfile_downloader.download_dotfile("dot.p10k.zsh", "~/.p10k.zsh")
 
-            new_lines = []
-            theme_set = False
-            for line in lines:
-                if line.strip().startswith("ZSH_THEME="):
-                    if not theme_set: # Only modify the first occurrence
-                        new_lines.append('ZSH_THEME="powerlevel10k/powerlevel10k"\n')
-                        theme_set = True
-                        print(f"  - Changed 'ZSH_THEME' line.")
-                    else:
-                        new_lines.append(line) # Keep subsequent ZSH_THEME lines as they are (unlikely but safe)
-                else:
-                    new_lines.append(line)
+    zshrc_manager = ConfigFileManager("~/.zshrc")
+    zshrc_manager.replace_line_prefix("ZSH_THEME=",
+                                      'ZSH_THEME="powerlevel10k/powerlevel10k"')
+    zshrc_manager.ensure_line_present("[ ! -f ~/.p10k.zsh ] || source "
+                                      "~/.p10k.zsh")
 
-            if not theme_set:
-                # If ZSH_THEME was not found, add it to the end of the file
-                new_lines.append('\nZSH_THEME="powerlevel10k/powerlevel10k"\n')
-                print(f"  - Added 'ZSH_THEME' line to {zshrc_path}.")
-
-            with open(zshrc_path, 'w') as f:
-                f.writelines(new_lines)
-            print("ZSH_THEME set to 'powerlevel10k/powerlevel10k' in ~/.zshrc.")
-
-        except Exception as e:
-            print(f"Error modifying {zshrc_path}: {e}")
-            print("Please manually set ZSH_THEME=\"powerlevel10k/powerlevel10k\" in your ~/.zshrc file.")
-    else:
-        print(f"Warning: {zshrc_path} not found. Cannot set PowerLevel10k theme automatically.")
-        print("Please ensure Oh My Zsh creates .zshrc or create it manually, then set ZSH_THEME=\"powerlevel10k/powerlevel10k\".")
-
-
-def print_usage():
-    print("Usage: ./bootstrap.py [action1] [action2] ...")
-    print("Available actions:")
-    print("  base      - Sets up Zsh, changes default shell, and installs essential packages (including Vim-Plug).")
-    print("  ohmyzsh   - Installs Oh My Zsh and PowerLevel10k theme.")
-    sys.exit(1)
 
 def main():
-    if len(sys.argv) < 2:
-        print_usage()
-
-    actions = {
-        "base": action_base,
-        "ohmyzsh": action_ohmyzsh,
-    }
-
-    selected_actions = sys.argv[1:]
-
-    for action_name in selected_actions:
-        if action_name in actions:
-            actions[action_name]()
-        else:
-            print(f"Error: Unknown action '{action_name}'")
-            print_usage()
-
-    print("\n--- Setup complete! ---")
-    print("Remember to log out and log back in for shell changes and theme to take full effect.")
-    print("For PowerLevel10k, configure it by running `p10k configure` after opening a new Zsh session.")
-
-if __name__ == "__main__":
-    # Ensure the script is run with python3
     if sys.version_info[0] < 3:
         print("This script requires Python 3. Please run it with python3.")
         sys.exit(1)
 
-    # Make sure the script is executable
     if not os.access(__file__, os.X_OK):
-        print(f"Warning: Script '{__file__}' is not executable. Run 'chmod +x {__file__}'")
+        print(f"Warning: Script '{__file__}' is not executable. Run 'chmod +x "
+              f"{__file__}'")
 
+    print("\n--- Running full system bootstrap ---")
+    _setup_zsh()
+    _install_base_packages()
+    _configure_zshenv()
+    _install_oh_my_zsh()
+    _install_powerlevel10k_and_set_theme()
+    _configure_vimrc()
+    _install_vim_plug()
+    _run_vim_plug_install()
+    _create_ssh_rc_file()
+    print("\n--- Setup complete! ---")
+
+if __name__ == "__main__":
     main()
+
