@@ -3,7 +3,8 @@
 import subprocess
 import os
 import sys
-import time
+import shutil
+import platform
 
 # --- Global Constants for URLs ---
 OH_MY_ZSH_INSTALL_URL = "https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh"
@@ -12,6 +13,8 @@ VIM_PLUG_URL = "https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.
 # Base URL for dotfiles from adn770/bootstrap repository
 DOTFILES_BASE_URL = "https://raw.githubusercontent.com/adn770/bootstrap/main"
 
+# GitHub API for fetching latest mkcert release (fallback for Ubuntu)
+MKCERT_LATEST_RELEASE_URL = "https://api.github.com/repos/FiloSottile/mkcert/releases/latest"
 
 def run_command(command, message=None, check=True):
     """
@@ -42,8 +45,7 @@ def run_command(command, message=None, check=True):
         return process
     except subprocess.CalledProcessError as e:
         print(f"Error executing command: {e}")
-        print(f"Stdout: {e.stdout}")
-        print(f"Stderr: {e.stderr}")
+        # Only print stdout/stderr if they haven't been consumed by the loop above
         sys.exit(1)
     except FileNotFoundError:
         print(f"Command not found: {command.split()[0]}")
@@ -76,16 +78,12 @@ class ConfigFileManager:
             return False
 
     def ensure_line_present(self, line_to_add, after_line_prefix=None):
-        """Ensures a specific line is present in the file, optionally after a
-        prefix.
-        """
+        """Ensures a specific line is present in the file."""
         normalized_line_to_add = line_to_add.strip()
 
-        # Check if the line (or a line containing it) already exists
         for line in self.content:
             if normalized_line_to_add in line.strip():
-                print(f"Content '{normalized_line_to_add}' already exists in "
-                      f"{self.file_path}. Skipping.")
+                print(f"Content '{normalized_line_to_add}' already exists in {self.file_path}. Skipping.")
                 return True
 
         if after_line_prefix:
@@ -96,29 +94,15 @@ class ConfigFileManager:
                     break
 
             if found_idx != -1:
-                # Insert the new line right after the found line
-                self.content.insert(found_idx + 1, line_to_add + "\n"
-                                    if not line_to_add.endswith('\n')
-                                    else line_to_add)
-                print(f"Added '{normalized_line_to_add}' after "
-                      f"'{after_line_prefix}' in {self.file_path}.")
+                self.content.insert(found_idx + 1, line_to_add + "\n" if not line_to_add.endswith('\n') else line_to_add)
             else:
-                # If prefix not found, just append to the end
                 if not self.content or not self.content[-1].endswith('\n'):
                     self.content.append('\n')
-                self.content.append(line_to_add + "\n"
-                                    if not line_to_add.endswith('\n')
-                                    else line_to_add)
-                print(f"Added '{normalized_line_to_add}' to {self.file_path} "
-                      f"(prefix '{after_line_prefix}' not found).")
+                self.content.append(line_to_add + "\n" if not line_to_add.endswith('\n') else line_to_add)
         else:
-            # Append if no specific placement is needed and it's not already there
             if not self.content or not self.content[-1].endswith('\n'):
                 self.content.append('\n')
-            self.content.append(line_to_add + "\n"
-                                if not line_to_add.endswith('\n')
-                                else line_to_add)
-            print(f"Added '{normalized_line_to_add}' to {self.file_path}.")
+            self.content.append(line_to_add + "\n" if not line_to_add.endswith('\n') else line_to_add)
 
         return self._write_file(self.content)
 
@@ -128,34 +112,104 @@ class ConfigFileManager:
         replaced = False
         for line in self.content:
             if line.strip().startswith(prefix):
-                new_content.append(new_line + "\n"
-                                   if not new_line.endswith('\n')
-                                   else new_line)
+                new_content.append(new_line + "\n" if not new_line.endswith('\n') else new_line)
                 replaced = True
-                print(f"Replaced line starting with '{prefix}' in "
-                      f"{self.file_path}.")
             else:
                 new_content.append(line)
 
         if not replaced:
-            # If prefix not found, add the new line at the end
             if not new_content or not new_content[-1].endswith('\n'):
                 new_content.append('\n')
-            new_content.append(new_line + "\n"
-                               if not new_line.endswith('\n')
-                               else new_line)
-            print(f"Added '{new_line}' to {self.file_path} (prefix '{prefix}' "
-                  "not found).")
+            new_content.append(new_line + "\n" if not new_line.endswith('\n') else new_line)
 
         self.content = new_content
         return self._write_file(self.content)
 
     def overwrite_file(self, new_content):
         """Overwrites the entire file with new content."""
-        self.content = [line + "\n" if not line.endswith('\n') else line
-                        for line in new_content.splitlines()]
+        self.content = [line + "\n" if not line.endswith('\n') else line for line in new_content.splitlines()]
         print(f"Overwriting {self.file_path}.")
         return self._write_file(self.content)
+
+class PackageManager:
+    """
+    Handles package installation for different Linux distributions (Arch/Ubuntu).
+    """
+    def __init__(self):
+        self.distro = self._detect_distro()
+        print(f"Detected Distribution: {self.distro.upper()}")
+
+    def _detect_distro(self):
+        """Detects the Linux distribution."""
+        try:
+            with open("/etc/os-release") as f:
+                content = f.read().lower()
+                # Check for Arch or Arch-based (including CachyOS)
+                if "id=arch" in content or "id_like=arch" in content or "cachyos" in content:
+                    return "arch"
+                # Check for Debian/Ubuntu
+                if "ubuntu" in content or "debian" in content:
+                    return "ubuntu"
+        except FileNotFoundError:
+            pass
+        return "unknown"
+
+    def update_repositories(self):
+        """Updates package repositories."""
+        print("Updating package repositories...")
+        if self.distro == "arch":
+            run_command("sudo pacman -Sy")
+        elif self.distro == "ubuntu":
+            run_command("sudo apt update")
+        else:
+            print(f"Warning: Update not implemented for {self.distro}")
+
+    def install(self, packages):
+        """Installs a list of packages."""
+        if not packages:
+            return
+
+        print(f"Installing packages: {', '.join(packages)}...")
+        if self.distro == "arch":
+            # --needed skips already installed packages, --noconfirm avoids yes/no prompts
+            run_command(f"sudo pacman -S --needed --noconfirm {' '.join(packages)}")
+        elif self.distro == "ubuntu":
+            run_command(f"sudo apt install -y {' '.join(packages)}")
+        else:
+            print(f"Error: Installation not implemented for {self.distro}")
+            sys.exit(1)
+
+    def get_distro_specific_name(self, package):
+        """Handles naming differences between distros."""
+        mapping = {
+            "ubuntu": {
+                "base-devel": "build-essential",
+                "docker": "docker.io", # ubuntu typically uses docker.io or docker-ce
+                "fd": "fd-find",       # installs as fdfind binary often, handled by zoxide usually
+                "mkcert_deps": "libnss3-tools"
+            },
+            "arch": {
+                "build-essential": "base-devel",
+                "python3-dev": "python", # Arch python includes headers
+                "fd-find": "fd",
+                "mkcert_deps": "nss",
+                "ollama": "ollama" # Arch usually has it in community/extra
+            }
+        }
+
+        # Check if the specific distro has a mapped name
+        if self.distro in mapping and package in mapping[self.distro]:
+            return mapping[self.distro][package]
+
+        # Check if the OTHER distro has this key, meaning we are using the generic key
+        # and checking if we need to swap.
+        if self.distro == "arch" and package == "build-essential":
+            return "base-devel"
+        if self.distro == "ubuntu" and package == "base-devel":
+            return "build-essential"
+
+        return package
+
 
 class DotfileDownloader:
     """
@@ -167,7 +221,6 @@ class DotfileDownloader:
     def download_dotfile(self, dotfile_name, local_path=None):
         """
         Downloads a specific dotfile from the repository to a local path.
-        If local_path is None, it defaults to ~/.dotfile_name.
         """
         remote_url = f"{self.base_url}/{dotfile_name}"
         target_local_path = (os.path.expanduser(local_path if local_path
@@ -176,51 +229,174 @@ class DotfileDownloader:
         print(f"Downloading {remote_url} to {target_local_path}...")
         try:
             run_command(f"curl -fLo {target_local_path} {remote_url}")
-            print(f"Successfully downloaded {dotfile_name} to "
-                  f"{target_local_path}.")
+            print(f"Successfully downloaded {dotfile_name} to {target_local_path}.")
             return True
         except Exception as e:
             print(f"Error downloading {dotfile_name}: {e}")
-            print(f"Please manually check or download {remote_url}.")
             return False
 
-def _setup_zsh():
+# --- Setup Functions ---
+
+def _setup_zsh(pm: PackageManager):
     """
-    Checks for Zsh, installs it if not present, and sets it as the default
-    shell.
+    Checks for Zsh, installs it if not present, and sets it as the default shell.
     """
     print("\n--- Setting up Zsh ---")
     print("Checking for Zsh installation...")
     result = run_command("which zsh", check=False)
     if result.returncode != 0:
         print("Zsh not found. Installing Zsh...")
-        run_command("sudo apt update")
-        run_command("sudo apt install -y zsh")
+        pm.install(["zsh"])
         print("Zsh installed successfully.")
     else:
         print("Zsh is already installed.")
 
     current_shell = os.environ.get('SHELL')
-    if current_shell != "/usr/bin/zsh" and current_shell != "/bin/zsh":
+    if "zsh" not in current_shell:
         print("Changing default shell to Zsh...")
-        run_command(f"chsh -s $(which zsh) {os.getenv('USER')}")
-        print("Default shell changed to Zsh. Please log out and log back in "
-              "for changes to take effect.")
+        try:
+            run_command(f"chsh -s $(which zsh) {os.getenv('USER')}")
+            print("Default shell changed to Zsh. Please log out and log back in.")
+        except Exception as e:
+            print(f"Could not change shell automatically: {e}")
+            print("Run: chsh -s $(which zsh)")
     else:
         print("Zsh is already your default shell.")
 
-def _install_base_packages():
+def _install_base_packages(pm: PackageManager):
     """
-    Installs a list of essential packages using apt.
+    Installs a list of essential packages.
     """
     print("\n--- Installing base packages ---")
+
+    # Common packages
     packages = ["bat", "btop", "cmake", "curl", "fzf", "gdb", "git", "tig",
-                "tmux", "vim", "zoxide"]
-    packages.sort()
-    print(f"Installing base packages: {', '.join(packages)}...")
-    run_command("sudo apt update")
-    run_command(f"sudo apt install -y {' '.join(packages)}")
+                "tmux", "vim", "zoxide", "wget"]
+
+    # Add distro-specific build tools
+    if pm.distro == "arch":
+        packages.append("base-devel")
+        packages.append("python") # Ensure python is there
+    else:
+        packages.append("build-essential")
+        packages.append("python3-pip")
+        packages.append("python3-venv")
+
+    # Resolve names
+    final_packages = [pm.get_distro_specific_name(p) for p in packages]
+    final_packages.sort()
+
+    pm.install(final_packages)
     print("Base packages installed successfully.")
+
+def _install_docker(pm: PackageManager):
+    """
+    Installs Docker, enables service, and adds user to group.
+    """
+    print("\n--- Installing and Configuring Docker ---")
+
+    docker_pkg = pm.get_distro_specific_name("docker")
+    pm.install([docker_pkg])
+
+    print("Enabling and starting Docker service...")
+    # Arch needs explicit enable --now, Ubuntu usually starts it but enable ensures it persists
+    run_command("sudo systemctl enable --now docker")
+
+    print("Adding current user to 'docker' group...")
+    user = os.getenv('USER')
+    try:
+        run_command(f"sudo usermod -aG docker {user}")
+        print(f"User {user} added to docker group. You may need to re-login.")
+    except Exception as e:
+        print(f"Failed to add user to docker group: {e}")
+
+def _install_mkcert(pm: PackageManager):
+    """
+    Installs mkcert and its dependencies.
+    """
+    print("\n--- Installing mkcert ---")
+
+    # Dependencies (NSS tools)
+    dep_pkg = pm.get_distro_specific_name("mkcert_deps")
+    pm.install([dep_pkg])
+
+    if pm.distro == "arch":
+        # Arch has mkcert in community/extra
+        pm.install(["mkcert"])
+    elif pm.distro == "ubuntu":
+        # Ubuntu apt often has very old mkcert or none. Install binary from GitHub.
+        print("Detected Ubuntu/Debian. Installing mkcert binary from GitHub...")
+        try:
+            # Using curl to get the binary URL to avoid python dependency hell inside the bootstrap
+            cmd = "curl -s https://api.github.com/repos/FiloSottile/mkcert/releases/latest | grep browser_download_url | grep linux-amd64 | cut -d '\"' -f 4"
+            proc = run_command(cmd, check=False)
+            download_url = proc.stdout.strip()
+
+            if download_url:
+                target_path = "/usr/local/bin/mkcert"
+                run_command(f"sudo curl -L {download_url} -o {target_path}")
+                run_command(f"sudo chmod +x {target_path}")
+                print(f"mkcert binary installed to {target_path}")
+            else:
+                print("Failed to fetch mkcert download URL.")
+        except Exception as e:
+            print(f"Error installing mkcert binary: {e}")
+
+    # Run mkcert installation
+    print("Running mkcert -install...")
+    try:
+        run_command("mkcert -install", check=False)
+        print("mkcert CA installed.")
+    except Exception:
+        print("mkcert is installed but 'mkcert -install' failed. You may need to run it manually.")
+
+def _install_ollama(pm: PackageManager):
+    """
+    Installs Ollama and configures the systemd override.
+    """
+    print("\n--- Installing and Configuring Ollama ---")
+
+    # 1. Install Ollama
+    if pm.distro == "arch":
+        # Arch usually has a package, or we can use the script.
+        # Using package manager is preferred on Arch for updates.
+        print("Installing Ollama via pacman...")
+        pm.install(["ollama"])
+    else:
+        # Ubuntu/Debian or others: Use the official install script to get the latest version
+        print("Installing Ollama via official install script...")
+        run_command("curl -fsSL https://ollama.com/install.sh | sh")
+
+    # 2. Configure Systemd Override
+    print("Configuring systemd override for Ollama...")
+    override_dir = "/etc/systemd/system/ollama.service.d"
+    override_file = f"{override_dir}/override.conf"
+
+    override_content = """[Service]
+#Environment="OLLAMA_DEBUG=1"
+#Environment="HSA_OVERRIDE_GFX_VERSION=11.5.1"
+Environment="OLLAMA_HOST=0.0.0.0"
+Environment="OLLAMA_ORIGINS=*"
+"""
+
+    try:
+        # Create directory securely
+        if not os.path.exists(override_dir):
+            run_command(f"sudo mkdir -p {override_dir}")
+
+        # Write content using tee to handle sudo permission
+        # Using echo with pipe to sudo tee
+        run_command(f"echo '{override_content}' | sudo tee {override_file} > /dev/null")
+        print(f"Created {override_file}")
+
+        # Reload systemd and restart ollama
+        run_command("sudo systemctl daemon-reload")
+        run_command("sudo systemctl enable --now ollama")
+        run_command("sudo systemctl restart ollama")
+        print("Ollama service restarted with new configuration.")
+
+    except Exception as e:
+        print(f"Error configuring Ollama systemd override: {e}")
 
 
 def _configure_vimrc():
@@ -230,7 +406,6 @@ def _configure_vimrc():
     print("\n--- Configuring ~/.vimrc from GitHub ---")
     dotfile_downloader = DotfileDownloader(DOTFILES_BASE_URL)
     dotfile_downloader.download_dotfile("dot.vimrc", "~/.vimrc")
-
 
 def _install_vim_plug():
     """
@@ -247,19 +422,19 @@ def _install_vim_plug():
     else:
         print("Vim-Plug is already installed.")
 
-
 def _run_vim_plug_install():
     """
     Runs Vim to install plugins using PlugInstall and then quits.
     """
     print("\n--- Running Vim PlugInstall ---")
     try:
+        # Check if vim is accessible
+        run_command("vim --version", check=False)
         run_command("vim +PlugInstall +qall", message="Running Vim PlugInstall")
         print("Vim PlugInstall completed.")
     except Exception as e:
         print(f"Error running Vim PlugInstall: {e}")
-        print("Please run 'vim +PlugInstall +qall' manually inside your "
-              "terminal.")
+        print("Please run 'vim +PlugInstall +qall' manually inside your terminal.")
 
 def _create_ssh_rc_file():
     """
@@ -279,7 +454,6 @@ fi"""
         if not os.path.exists(ssh_dir):
             print(f"Creating directory: {ssh_dir}")
             os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
-            print(f"Set permissions for {ssh_dir} to 0o700.")
 
         ssh_rc_manager = ConfigFileManager(ssh_rc_path)
         ssh_rc_manager.overwrite_file(ssh_rc_content)
@@ -288,7 +462,6 @@ fi"""
 
     except Exception as e:
         print(f"Error creating/modifying '{ssh_rc_path}': {e}")
-        print("Please create the file manually if needed.")
 
 def _configure_zshenv():
     """
@@ -340,8 +513,7 @@ def _install_oh_my_zsh():
 
 def _install_powerlevel10k_and_set_theme():
     """
-    Installs PowerLevel10k theme, downloads dot.p10k.zsh, and configures
-    .zshrc.
+    Installs PowerLevel10k theme, downloads dot.p10k.zsh, and configures .zshrc.
     """
     print("\n--- Installing PowerLevel10k theme and setting it in ~/.zshrc ---")
     p10k_dir = os.path.expanduser("~/.oh-my-zsh/custom/themes/powerlevel10k")
@@ -359,22 +531,25 @@ def _install_powerlevel10k_and_set_theme():
     zshrc_manager = ConfigFileManager("~/.zshrc")
     zshrc_manager.replace_line_prefix("ZSH_THEME=",
                                       'ZSH_THEME="powerlevel10k/powerlevel10k"')
-    zshrc_manager.ensure_line_present("[ ! -f ~/.p10k.zsh ] || source "
-                                      "~/.p10k.zsh")
-
+    zshrc_manager.ensure_line_present("[ ! -f ~/.p10k.zsh ] || source ~/.p10k.zsh")
 
 def main():
     if sys.version_info[0] < 3:
         print("This script requires Python 3. Please run it with python3.")
         sys.exit(1)
 
-    if not os.access(__file__, os.X_OK):
-        print(f"Warning: Script '{__file__}' is not executable. Run 'chmod +x "
-              f"{__file__}'")
-
     print("\n--- Running full system bootstrap ---")
-    _setup_zsh()
-    _install_base_packages()
+
+    # Initialize Package Manager (Auto-detects OS)
+    pm = PackageManager()
+    pm.update_repositories()
+
+    _install_base_packages(pm)
+    _install_docker(pm)
+    _install_mkcert(pm)
+    _install_ollama(pm)
+
+    _setup_zsh(pm)
     _configure_zshenv()
     _install_oh_my_zsh()
     _install_powerlevel10k_and_set_theme()
@@ -382,8 +557,9 @@ def main():
     _install_vim_plug()
     _run_vim_plug_install()
     _create_ssh_rc_file()
+
     print("\n--- Setup complete! ---")
+    print("Please log out and log back in for group changes (docker) and shell changes to take effect.")
 
 if __name__ == "__main__":
     main()
-
