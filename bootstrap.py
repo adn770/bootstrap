@@ -312,7 +312,8 @@ def _install_docker(pm: PackageManager):
 
 def _install_mkcert(pm: PackageManager):
     """
-    Installs mkcert and its dependencies.
+    Installs mkcert and its dependencies, prioritizing apt on Ubuntu/Debian
+    and falling back to a binary download if apt fails.
     """
     print("\n--- Installing mkcert ---")
 
@@ -324,23 +325,33 @@ def _install_mkcert(pm: PackageManager):
         # Arch has mkcert in community/extra
         pm.install(["mkcert"])
     elif pm.distro == "ubuntu":
-        # Ubuntu apt often has very old mkcert or none. Install binary from GitHub.
-        print("Detected Ubuntu/Debian. Installing mkcert binary from GitHub...")
-        try:
-            # Using curl to get the binary URL to avoid python dependency hell inside the bootstrap
-            cmd = "curl -s https://api.github.com/repos/FiloSottile/mkcert/releases/latest | grep browser_download_url | grep linux-amd64 | cut -d '\"' -f 4"
-            proc = run_command(cmd, check=False)
-            download_url = proc.stdout.strip()
+        # Ubuntu apt: Try apt install first, then fallback to binary.
+        print("Detected Ubuntu/Debian. Trying apt install for mkcert first...")
 
-            if download_url:
-                target_path = "/usr/local/bin/mkcert"
-                run_command(f"sudo curl -L {download_url} -o {target_path}")
-                run_command(f"sudo chmod +x {target_path}")
-                print(f"mkcert binary installed to {target_path}")
-            else:
-                print("Failed to fetch mkcert download URL.")
-        except Exception as e:
-            print(f"Error installing mkcert binary: {e}")
+        # 1. Try apt install (check=False so script doesn't exit on failure)
+        apt_install_cmd = f"sudo apt install -y mkcert"
+        apt_install_proc = run_command(apt_install_cmd, check=False)
+
+        if apt_install_proc.returncode == 0:
+            print("mkcert installed successfully via apt.")
+        else:
+            # 2. Fallback to binary download
+            print("Apt installation failed or mkcert package not found. Falling back to binary download from GitHub...")
+            try:
+                # Using curl to get the binary URL to avoid python dependency hell inside the bootstrap
+                cmd = "curl -s https://api.github.com/repos/FiloSottile/mkcert/releases/latest | grep browser_download_url | grep linux-amd64 | cut -d '\"' -f 4"
+                proc = run_command(cmd, check=False)
+                download_url = proc.stdout.strip()
+
+                if download_url:
+                    target_path = "/usr/local/bin/mkcert"
+                    run_command(f"sudo curl -L {download_url} -o {target_path}")
+                    run_command(f"sudo chmod +x {target_path}")
+                    print(f"mkcert binary installed to {target_path}")
+                else:
+                    print("Failed to fetch mkcert download URL.")
+            except Exception as e:
+                print(f"Error installing mkcert binary: {e}")
 
     # Run mkcert installation
     print("Running mkcert -install...")
