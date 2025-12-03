@@ -295,8 +295,35 @@ def _install_docker(pm: PackageManager):
     """
     print("\n--- Installing and Configuring Docker ---")
 
-    docker_pkg = pm.get_distro_specific_name("docker")
-    pm.install([docker_pkg])
+    if pm.distro == "arch":
+        docker_pkg = pm.get_distro_specific_name("docker")
+        pm.install([docker_pkg])
+    elif pm.distro == "ubuntu":
+        print("Detected Ubuntu/Debian. Installing Docker from official repository...")
+
+        # 1. Install prerequisites
+        pm.install(["ca-certificates", "curl", "gnupg"])
+
+        # 2. Add Docker's official GPG key
+        # Create directory for keyrings if it doesn't exist
+        run_command("sudo install -m 0755 -d /etc/apt/keyrings")
+        # Download and save the GPG key
+        run_command("sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc")
+        run_command("sudo chmod a+r /etc/apt/keyrings/docker.asc")
+
+        # 3. Add the repository to Apt sources
+        # We assume standard /etc/os-release is available
+        repo_cmd = (
+            'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] '
+            'https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | '
+            'sudo tee /etc/apt/sources.list.d/docker.list > /dev/null'
+        )
+        run_command(repo_cmd)
+
+        # 4. Update and Install
+        run_command("sudo apt update")
+        # Install specific docker packages for Docker Engine
+        run_command("sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin")
 
     print("Enabling and starting Docker service...")
     # Arch needs explicit enable --now, Ubuntu usually starts it but enable ensures it persists
