@@ -5,6 +5,7 @@ import os
 import sys
 import shutil
 import platform
+import argparse
 
 # --- Global Constants for URLs ---
 OH_MY_ZSH_INSTALL_URL = "https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh"
@@ -15,6 +16,27 @@ DOTFILES_BASE_URL = "https://raw.githubusercontent.com/adn770/bootstrap/main"
 
 # GitHub API for fetching latest mkcert release (fallback for Ubuntu)
 MKCERT_LATEST_RELEASE_URL = "https://api.github.com/repos/FiloSottile/mkcert/releases/latest"
+
+def ask_confirmation(step_description, interactive):
+    """
+    Asks the user for confirmation if interactive mode is enabled.
+    Returns True if confirmed or if not in interactive mode.
+    """
+    if not interactive:
+        return True
+
+    # Default to No for safety in interactive mode
+    try:
+        response = input(f"\n[Interactive] Do you want to {step_description}? [y/N]: ").strip().lower()
+    except KeyboardInterrupt:
+        print("\nOperation cancelled.")
+        sys.exit(1)
+
+    if response in ('y', 'yes'):
+        return True
+
+    print(f"Skipping: {step_description}")
+    return False
 
 def run_command(command, message=None, check=True):
     """
@@ -133,14 +155,21 @@ class ConfigFileManager:
 
 class PackageManager:
     """
-    Handles package installation for different Linux distributions (Arch/Ubuntu).
+    Handles package installation for different Linux distributions (Arch/Ubuntu) and macOS.
     """
-    def __init__(self):
+    def __init__(self, interactive=False):
+        self.interactive = interactive
         self.distro = self._detect_distro()
-        print(f"Detected Distribution: {self.distro.upper()}")
+        print(f"Detected Distribution/OS: {self.distro.upper()}")
+
+        if self.distro == "macos":
+            self._ensure_homebrew()
 
     def _detect_distro(self):
-        """Detects the Linux distribution."""
+        """Detects the Linux distribution or macOS."""
+        if platform.system() == "Darwin":
+            return "macos"
+
         try:
             with open("/etc/os-release") as f:
                 content = f.read().lower()
@@ -154,6 +183,28 @@ class PackageManager:
             pass
         return "unknown"
 
+    def _ensure_homebrew(self):
+        """Checks if Homebrew is installed, installs it if not (macOS only)."""
+        print("Checking for Homebrew...")
+        result = run_command("which brew", check=False)
+        if result.returncode != 0:
+            if not ask_confirmation("install Homebrew (Required for macOS packages)", self.interactive):
+                print("Skipping Homebrew. Subsequent package installations may fail.")
+                return
+
+            print("Homebrew not found. Installing...")
+            cmd = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+            run_command(cmd, message="Installing Homebrew")
+
+            # Setup shell environment for immediate use in this script
+            if os.path.exists("/opt/homebrew/bin/brew"):
+                os.environ["PATH"] += ":/opt/homebrew/bin"
+            elif os.path.exists("/usr/local/bin/brew"):
+                os.environ["PATH"] += ":/usr/local/bin"
+            print("Homebrew installed.")
+        else:
+            print("Homebrew is already installed.")
+
     def update_repositories(self):
         """Updates package repositories."""
         print("Updating package repositories...")
@@ -161,10 +212,12 @@ class PackageManager:
             run_command("sudo pacman -Sy")
         elif self.distro == "ubuntu":
             run_command("sudo apt update")
+        elif self.distro == "macos":
+            run_command("brew update")
         else:
             print(f"Warning: Update not implemented for {self.distro}")
 
-    def install(self, packages):
+    def install(self, packages, cask=False):
         """Installs a list of packages."""
         if not packages:
             return
@@ -175,6 +228,11 @@ class PackageManager:
             run_command(f"sudo pacman -S --needed --noconfirm {' '.join(packages)}")
         elif self.distro == "ubuntu":
             run_command(f"sudo apt install -y {' '.join(packages)}")
+        elif self.distro == "macos":
+            if cask:
+                run_command(f"brew install --cask {' '.join(packages)}")
+            else:
+                run_command(f"brew install {' '.join(packages)}")
         else:
             print(f"Error: Installation not implemented for {self.distro}")
             sys.exit(1)
@@ -194,6 +252,14 @@ class PackageManager:
                 "fd-find": "fd",
                 "mkcert_deps": "nss",
                 "ollama": "ollama" # Arch usually has it in community/extra
+            },
+            "macos": {
+                "build-essential": "", # Xcode handling separate or not needed for brew bottles
+                "python3-dev": "python",
+                "docker": "docker", # Uses cask
+                "mkcert_deps": "nss",
+                "fd-find": "fd",
+                "gdb": "" # Skip GDB on mac (codesign issues), prefer lldb or install manually
             }
         }
 
@@ -201,8 +267,7 @@ class PackageManager:
         if self.distro in mapping and package in mapping[self.distro]:
             return mapping[self.distro][package]
 
-        # Check if the OTHER distro has this key, meaning we are using the generic key
-        # and checking if we need to swap.
+        # Fallback mappings to cross-reference (Ubuntu <-> Arch) logic from original script
         if self.distro == "arch" and package == "build-essential":
             return "base-devel"
         if self.distro == "ubuntu" and package == "base-devel":
@@ -244,6 +309,7 @@ def _setup_zsh(pm: PackageManager):
     print("\n--- Setting up Zsh ---")
     print("Checking for Zsh installation...")
     result = run_command("which zsh", check=False)
+
     if result.returncode != 0:
         print("Zsh not found. Installing Zsh...")
         pm.install(["zsh"])
@@ -251,11 +317,14 @@ def _setup_zsh(pm: PackageManager):
     else:
         print("Zsh is already installed.")
 
-    current_shell = os.environ.get('SHELL')
+    current_shell = os.environ.get('SHELL', '')
     if "zsh" not in current_shell:
         print("Changing default shell to Zsh...")
         try:
-            run_command(f"chsh -s $(which zsh) {os.getenv('USER')}")
+            # macOS chsh doesn't accept -s $(which zsh) without sudo usually,
+            # or requires full path from /etc/shells.
+            zsh_path = run_command("which zsh", check=False).stdout.strip()
+            run_command(f"chsh -s {zsh_path} {os.getenv('USER')}")
             print("Default shell changed to Zsh. Please log out and log back in.")
         except Exception as e:
             print(f"Could not change shell automatically: {e}")
@@ -277,24 +346,46 @@ def _install_base_packages(pm: PackageManager):
     if pm.distro == "arch":
         packages.append("base-devel")
         packages.append("python") # Ensure python is there
+    elif pm.distro == "macos":
+        # Check for Xcode command line tools
+        print("Checking for Xcode Command Line Tools...")
+        xcode_check = run_command("xcode-select -p", check=False)
+        if xcode_check.returncode != 0:
+             print("Installing Xcode Command Line Tools...")
+             run_command("xcode-select --install", check=False)
+             print("Note: You may need to complete the popup installation before continuing.")
+        packages.append("python")
     else:
         packages.append("build-essential")
         packages.append("python3-pip")
         packages.append("python3-venv")
 
     # Resolve names
-    final_packages = [pm.get_distro_specific_name(p) for p in packages]
-    final_packages.sort()
+    final_packages = []
+    for p in packages:
+        mapped = pm.get_distro_specific_name(p)
+        if mapped: # Only add if mapping didn't return empty string (skip)
+            final_packages.append(mapped)
 
+    final_packages.sort()
     pm.install(final_packages)
     print("Base packages installed successfully.")
 
 def _install_docker(pm: PackageManager):
     """
-    Installs Docker, enables service, and adds user to group.
+    Installs Docker.
+    On Linux: enables service and adds user to group.
+    On macOS: Installs Docker Desktop (OrbStack is a good alternative, but default to Docker for now).
     """
     print("\n--- Installing and Configuring Docker ---")
 
+    if pm.distro == "macos":
+        print("Detected macOS. Installing Docker via Homebrew Cask...")
+        pm.install(["docker"], cask=True)
+        print("Docker installed. Please launch 'Docker' from Applications to start the engine.")
+        return
+
+    # Linux Logic
     if pm.distro == "arch":
         docker_pkg = pm.get_distro_specific_name("docker")
         pm.install([docker_pkg])
@@ -305,14 +396,11 @@ def _install_docker(pm: PackageManager):
         pm.install(["ca-certificates", "curl", "gnupg"])
 
         # 2. Add Docker's official GPG key
-        # Create directory for keyrings if it doesn't exist
         run_command("sudo install -m 0755 -d /etc/apt/keyrings")
-        # Download and save the GPG key
         run_command("sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc")
         run_command("sudo chmod a+r /etc/apt/keyrings/docker.asc")
 
         # 3. Add the repository to Apt sources
-        # We assume standard /etc/os-release is available
         repo_cmd = (
             'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] '
             'https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | '
@@ -322,11 +410,9 @@ def _install_docker(pm: PackageManager):
 
         # 4. Update and Install
         run_command("sudo apt update")
-        # Install specific docker packages for Docker Engine
         run_command("sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin")
 
     print("Enabling and starting Docker service...")
-    # Arch needs explicit enable --now, Ubuntu usually starts it but enable ensures it persists
     run_command("sudo systemctl enable --now docker")
 
     print("Adding current user to 'docker' group...")
@@ -339,33 +425,29 @@ def _install_docker(pm: PackageManager):
 
 def _install_mkcert(pm: PackageManager):
     """
-    Installs mkcert and its dependencies, prioritizing apt on Ubuntu/Debian
-    and falling back to a binary download if apt fails.
+    Installs mkcert and its dependencies.
     """
     print("\n--- Installing mkcert ---")
 
     # Dependencies (NSS tools)
     dep_pkg = pm.get_distro_specific_name("mkcert_deps")
-    pm.install([dep_pkg])
+    if dep_pkg:
+        pm.install([dep_pkg])
 
-    if pm.distro == "arch":
-        # Arch has mkcert in community/extra
+    if pm.distro == "macos":
+        pm.install(["mkcert"])
+    elif pm.distro == "arch":
         pm.install(["mkcert"])
     elif pm.distro == "ubuntu":
-        # Ubuntu apt: Try apt install first, then fallback to binary.
         print("Detected Ubuntu/Debian. Trying apt install for mkcert first...")
-
-        # 1. Try apt install (check=False so script doesn't exit on failure)
         apt_install_cmd = f"sudo apt install -y mkcert"
         apt_install_proc = run_command(apt_install_cmd, check=False)
 
         if apt_install_proc.returncode == 0:
             print("mkcert installed successfully via apt.")
         else:
-            # 2. Fallback to binary download
-            print("Apt installation failed or mkcert package not found. Falling back to binary download from GitHub...")
+            print("Apt installation failed. Falling back to binary download...")
             try:
-                # Using curl to get the binary URL to avoid python dependency hell inside the bootstrap
                 cmd = "curl -s https://api.github.com/repos/FiloSottile/mkcert/releases/latest | grep browser_download_url | grep linux-amd64 | cut -d '\"' -f 4"
                 proc = run_command(cmd, check=False)
                 download_url = proc.stdout.strip()
@@ -386,26 +468,28 @@ def _install_mkcert(pm: PackageManager):
         run_command("mkcert -install", check=False)
         print("mkcert CA installed.")
     except Exception:
-        print("mkcert is installed but 'mkcert -install' failed. You may need to run it manually.")
+        print("mkcert is installed but 'mkcert -install' failed.")
 
 def _install_ollama(pm: PackageManager):
     """
-    Installs Ollama and configures the systemd override.
+    Installs Ollama and configures the systemd override (Linux) or services (macOS).
     """
     print("\n--- Installing and Configuring Ollama ---")
 
-    # 1. Install Ollama
+    if pm.distro == "macos":
+        pm.install(["ollama"])
+        print("Ollama installed via Homebrew. To start it, run: 'brew services start ollama' or run the 'Ollama' app if installed via cask.")
+        return
+
+    # Linux Installation
     if pm.distro == "arch":
-        # Arch usually has a package, or we can use the script.
-        # Using package manager is preferred on Arch for updates.
         print("Installing Ollama via pacman...")
         pm.install(["ollama"])
     else:
-        # Ubuntu/Debian or others: Use the official install script to get the latest version
         print("Installing Ollama via official install script...")
         run_command("curl -fsSL https://ollama.com/install.sh | sh")
 
-    # 2. Configure Systemd Override
+    # Linux Systemd Override
     print("Configuring systemd override for Ollama...")
     override_dir = "/etc/systemd/system/ollama.service.d"
     override_file = f"{override_dir}/override.conf"
@@ -418,16 +502,12 @@ Environment="OLLAMA_ORIGINS=*"
 """
 
     try:
-        # Create directory securely
         if not os.path.exists(override_dir):
             run_command(f"sudo mkdir -p {override_dir}")
 
-        # Write content using tee to handle sudo permission
-        # Using echo with pipe to sudo tee
         run_command(f"echo '{override_content}' | sudo tee {override_file} > /dev/null")
         print(f"Created {override_file}")
 
-        # Reload systemd and restart ollama
         run_command("sudo systemctl daemon-reload")
         run_command("sudo systemctl enable --now ollama")
         run_command("sudo systemctl restart ollama")
@@ -466,7 +546,6 @@ def _run_vim_plug_install():
     """
     print("\n--- Running Vim PlugInstall ---")
     try:
-        # Check if vim is accessible
         run_command("vim --version", check=False)
         run_command("vim +PlugInstall +qall", message="Running Vim PlugInstall")
         print("Vim PlugInstall completed.")
@@ -516,6 +595,14 @@ fi
 # set PATH so it includes user's private bin if it exists
 if [ -d "$HOME/.local/bin" ] ; then
     PATH="$HOME/.local/bin:$PATH"
+fi
+
+# Add Homebrew to PATH (macOS)
+if [[ -d "/opt/homebrew/bin" ]]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [[ -d "/usr/local/bin" && "$OSTYPE" == "darwin"* ]]; then
+    # Intel Mac fallbacks
+    PATH="/usr/local/bin:$PATH"
 fi
 
 # tmux+ssh helper function with iterm integration
@@ -576,28 +663,68 @@ def main():
         print("This script requires Python 3. Please run it with python3.")
         sys.exit(1)
 
+    # Parse arguments
+    parser = argparse.ArgumentParser(description="System bootstrap script.")
+    parser.add_argument("--extra", action="store_true", help="Install extra components (Docker, Ollama).")
+    parser.add_argument("--interactive", "-i", action="store_true", help="Ask for confirmation before each step.")
+    args = parser.parse_args()
+
     print("\n--- Running full system bootstrap ---")
+    if args.extra:
+        print("Extra mode enabled: Docker and Ollama will be installed.")
+    if args.interactive:
+        print("Interactive mode enabled: You will be prompted for each step.")
 
-    # Initialize Package Manager (Auto-detects OS)
-    pm = PackageManager()
-    pm.update_repositories()
+    # Initialize Package Manager (Auto-detects OS and installs Brew on Mac)
+    pm = PackageManager(interactive=args.interactive)
 
-    _install_base_packages(pm)
-    _install_docker(pm)
-    _install_mkcert(pm)
-    _install_ollama(pm)
+    if ask_confirmation("update package repositories", args.interactive):
+        pm.update_repositories()
 
-    _setup_zsh(pm)
-    _configure_zshenv()
-    _install_oh_my_zsh()
-    _install_powerlevel10k_and_set_theme()
-    _configure_vimrc()
-    _install_vim_plug()
-    _run_vim_plug_install()
-    _create_ssh_rc_file()
+    if ask_confirmation("install base packages", args.interactive):
+        _install_base_packages(pm)
+
+    if args.extra:
+        if ask_confirmation("install Docker", args.interactive):
+            _install_docker(pm)
+    else:
+        print("\n--- Skipping Docker (use --extra to install) ---")
+
+    if ask_confirmation("install mkcert", args.interactive):
+        _install_mkcert(pm)
+
+    if args.extra:
+        if ask_confirmation("install Ollama", args.interactive):
+            _install_ollama(pm)
+    else:
+        print("\n--- Skipping Ollama (use --extra to install) ---")
+
+    if ask_confirmation("setup Zsh shell", args.interactive):
+        _setup_zsh(pm)
+
+    if ask_confirmation("configure .zshenv", args.interactive):
+        _configure_zshenv()
+
+    if ask_confirmation("install Oh My Zsh", args.interactive):
+        _install_oh_my_zsh()
+
+    if ask_confirmation("install PowerLevel10k and configure theme", args.interactive):
+        _install_powerlevel10k_and_set_theme()
+
+    if ask_confirmation("configure .vimrc", args.interactive):
+        _configure_vimrc()
+
+    if ask_confirmation("install Vim-Plug", args.interactive):
+        _install_vim_plug()
+
+    if ask_confirmation("run Vim PlugInstall", args.interactive):
+        _run_vim_plug_install()
+
+    if ask_confirmation("create SSH rc file", args.interactive):
+        _create_ssh_rc_file()
 
     print("\n--- Setup complete! ---")
-    print("Please log out and log back in for group changes (docker) and shell changes to take effect.")
+    print("Please log out and log back in for changes to take effect.")
 
 if __name__ == "__main__":
     main()
